@@ -1,5 +1,3 @@
-
-
 import tensorflow as tf
 
 
@@ -109,7 +107,7 @@ def _weights(name, shape, mean=0.0, stddev=0.02, initializer=None):
 def _bias(name, shape, constant=0.0):
     """
     :param name: string, the name of bias, e.g. 'bias'
-    :param shape: list, the shape of bias.
+    :param shape: list, the shape of bias
     :param constant: float, the initial value of bias
     :return: bias
     """
@@ -117,7 +115,8 @@ def _bias(name, shape, constant=0.0):
 
 
 def fully_connected(x, output_dims, use_bias=True, is_training=True, reuse=False,
-                    name=None, activation=None, norm=None, weights_initializer=None):
+                    name=None, activation=None, norm_after_activation=True, norm=None,
+                    weights_initializer=None):
     """
     :param x: 2D tensor.
     :param output_dims: int, the number of output dimensions.
@@ -126,8 +125,9 @@ def fully_connected(x, output_dims, use_bias=True, is_training=True, reuse=False
     :param reuse: bool, reuse or not
     :param name: string, name of the fully_connected layer
     :param activation: function, the activation function
+    :param norm_after_activation, using normalization before or after activation
     :param norm: string, use norm or not, and what kind of norm methods will be used
-    :param weights_initializer: string, determine what kind of initializer methods of weights will be used.
+    :param weights_initializer: string, determine what kind of initializer methods of weights will be used
     :return: 2D tensor, output of fully_connected layer
     """
     with tf.variable_scope(name, reuse=reuse):
@@ -137,16 +137,22 @@ def fully_connected(x, output_dims, use_bias=True, is_training=True, reuse=False
         if use_bias:
             bias = _bias('bias', [output_dims])
             x = tf.add(x, bias)
-        if norm is not None:
-            x = _norm(x, norm, is_training)
-        if activation is not None:
-            x = activation(x)
+        if norm_after_activation:
+            if activation is not None:
+                x = activation(x)
+            if norm is not None:
+                x = _norm(x, norm, is_training)
+        else:
+            if norm is not None:
+                x = _norm(x, norm, is_training)
+            if activation is not None:
+                x = activation(x)
         return x
 
 
 def conv2d(x, filters, ksize, pad_size=0, stride=1, pad_mode='CONSTANT', padding='VALID',
-           norm=None, activation=None, name='conv2d', reuse=False, is_training=True,
-           kernel_initializer='he_uniform', use_bias=False, upsampling=None):
+           norm=None, activation=None, norm_after_activation=True, name='conv2d', reuse=False,
+           is_training=True, kernel_initializer='he_uniform', use_bias=False, upsampling=None):
     """
     :param x: 4D tensor, [batch_size, height, width, channels]
     :param filters: int, number of output channels
@@ -157,8 +163,9 @@ def conv2d(x, filters, ksize, pad_size=0, stride=1, pad_mode='CONSTANT', padding
     :param padding: string, another way to set the padding method
     :param norm: string, use norm or not, and what kind of norm methods will be used
     :param activation: function, the activation function
+    :param norm_after_activation, using normalization before or after activation
     :param name: string, name of convolution layer
-    :param reuse: bool, use bias or not
+    :param reuse: bool, reuse or not
     :param is_training: bool, is training or not
     :param kernel_initializer:  string, determine what kind of initializer methods of weights will be used.
     :param use_bias: bool, use bias or not
@@ -180,10 +187,16 @@ def conv2d(x, filters, ksize, pad_size=0, stride=1, pad_mode='CONSTANT', padding
         if use_bias:
             bias = _bias('bias', [filters])
             x = tf.add(x, bias)
-        if norm is not None:
-            x = _norm(x, norm, is_training)
-        if activation is not None:
-            x = activation(x)
+        if norm_after_activation:
+            if activation is not None:
+                x = activation(x)
+            if norm is not None:
+                x = _norm(x, norm, is_training)
+        else:
+            if norm is not None:
+                x = _norm(x, norm, is_training)
+            if activation is not None:
+                x = activation(x)
         return x
 
 
@@ -197,7 +210,7 @@ def unconv2d(x, output_dims, ksize, stride=1, norm=None, activation=None,
     :param norm: string, use norm or not, and what kind of norm methods will be used
     :param activation: function, the activation function
     :param name: string, name of convolution layer
-    :param reuse: bool, use bias or not
+    :param reuse: bool, reuse or not
     :param use_bias: bool, use bias or not
     :param is_training: bool, is training or not
     :param kernel_initializer: string, determine what kind of initializer methods of weights will be used.
@@ -222,7 +235,7 @@ def unconv2d(x, output_dims, ksize, stride=1, norm=None, activation=None,
         return x
 
 
-def _norm(x, norm, is_training, activation=None):
+def _norm(x, norm, is_training, group_size=16, activation=None):
     """
     :param x: 2D or 4D tensor.
     :param norm: string, norm method
@@ -234,6 +247,10 @@ def _norm(x, norm, is_training, activation=None):
         return _batch_norm(x, is_training, activation=activation)
     if norm == 'instance':
         return _instance_norm(x)
+    if norm == 'layer':
+        return _layer_norm(x)
+    if norm == 'group':
+        return _group_norm(x, group_size=group_size)
 
 
 def _batch_norm(x, is_training, activation=None):
@@ -271,6 +288,72 @@ def _instance_norm(x, activation=None):
         if activation is not None:
             x = activation(x)
         return x
+
+
+def _layer_norm(x, activation=None):
+    """
+    :param x: 2D or 4D tensor
+    :param activation: function, the activation function
+    :return: layer normalization of input
+    """
+    with tf.variable_scope('layer_norm'):
+        depth = x.get_shape()[3]
+        scale = _weights('scale', [depth], mean=1.0)
+        offset = _bias('offset', [depth])
+        axis = [1, 2, 3]
+        mean, var = tf.nn.moments(x, axis, keep_dims=True)
+        inv = tf.rsqrt(var + 1e-5)
+        x = scale * (x - mean) * inv + offset
+        if activation is not None:
+            x = activation(x)
+        return x
+
+
+def _group_norm(x, group_size=16, activation=None):
+    """
+    :param x: 2D or 4D tensor
+    :param group_size: size of group used to norm
+    :param activation: function, the activation function
+    :return: group normalization of input
+    """
+    with tf.variable_scope('group_norm'):
+        shape = x.get_shape()
+        scale = _weights('scale', [shape[3]], mean=1.0)
+        offset = _bias('offset', [shape[3]])
+        x = tf.reshape(x, [tf.cast(shape[0], tf.int32), tf.cast(shape[1], tf.int32), tf.cast(shape[2], tf.int32),
+                           group_size, tf.cast(shape[3] // group_size, tf.int32)])
+        axis = [1, 2, 4]
+        mean, var = tf.nn.moments(x, axis, keep_dims=True)
+        inv = tf.rsqrt(var + 1e-5)
+        x = (x - mean) * inv
+        x = tf.reshape(x, [tf.cast(shape[0], tf.int32), tf.cast(shape[1], tf.int32), tf.cast(shape[2], tf.int32),
+                           tf.cast(shape[3], tf.int32)])
+        x = scale * x + offset
+        if activation is not None:
+            x = activation(x)
+        return x
+
+
+def _switchable_norm(x, activation=None, momentum=0.997, using_moving_avg=True, last_gamma=False):
+    """
+    :param x: 2D or 4D tensor
+    :param activation: using activation function or not
+    :param momentum: weights of current
+    :param using_moving_avg:
+    :param last_gamma:
+    :return:
+    """
+
+
+def max_pool(x, ksize=2, stride=2):
+    """
+    :param x: 4D tensor
+    :param ksize: int, kernel size of pool kernel
+    :param stride: int, stride of pool kernel
+    :return: 4D tensor, output of pool layer
+    """
+    return tf.nn.max_pool(x, ksize=[1, ksize, ksize, 1],
+                          strides=[1, stride, stride, 1], padding='SAME')
 
 
 def max_pool_with_argmax(x, stride=2):
